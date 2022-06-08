@@ -1,0 +1,317 @@
+---
+title: "R Notebook"
+output: html_notebook
+editor_options: 
+  chunk_output_type: inline
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+
+```{r}
+rm(list = ls())
+
+library(tidyverse)
+
+library(lme4)
+library(nlme)
+library(ggpubr)
+library(lmerTest)
+library(wesanderson)
+
+#Color schema
+custom.col <- c("#FFDB6D", "#C4961A", "#F4EDCA", 
+                "#D16103", "#C3D7A4", "#52854C", "#4E84C4", "#293352")
+custom2<-c('#2F9599','#F26B38','#F9D423')
+
+#Read in csv file. 
+all_behave<-read.csv('All_Data_p.csv') %>% 
+  filter(blocknum != 4)
+
+
+
+#Data for fitting.
+data_for_fitting <- all_behave%>%
+  filter(blocktype!='4')
+
+data_for_fitting$trialnum <- data_for_fitting$trialnum+1
+data_for_fitting$blocktype[data_for_fitting$blocktype=='advice'] = 1
+data_for_fitting$blocktype[data_for_fitting$blocktype=='eavesdrop'] = 2
+data_for_fitting$blocktype[data_for_fitting$blocktype=='self'] = 3
+data_for_fitting$blocktype<-as.numeric(data_for_fitting$blocktype)
+
+data_for_fitting<-data_for_fitting[with(data_for_fitting, order( id,blocktype,trialnum )),]
+
+data_for_fitting$trialblocks = data_for_fitting$trialnum+15*(data_for_fitting$blocktype-1)
+
+NumSubs=length(unique(data_for_fitting$id))
+
+```
+# MODEL 1 
+
+```{r model q-boost, beta-boost}
+#Build Model
+q_beta_boost__no_co_model = function(data,par,pred=0){ 
+  ll <- 1000000
+  
+  choice = data$choice+1;
+  reward = data$reward/10;
+  trialnum = data$trialnum;
+  beta = par[1]; #Standard Beta
+  alpha = par[2];  #Standard Alpha 
+  boost_advice = par[3]; # Q-boost Boost on advice
+  boost_observe = par[4]; #Q-boost Boost on Observe
+  beta_boost_advice = par[5]; #Beta boost on Advice
+  beta_boost_observe = par[6]; #Beta boost on Observe
+  
+  
+  Pchoice = rep(0.5,length(choice)); #Setup basic 50% chance vector
+  
+  
+  NumReps=length(choice) #How many trials
+  Q=c(0.4,0.4); #Start Q-values
+  this_beta = beta 
+  this_alpha = alpha
+  Q_data <- data.frame(Q1 = 0, Q2 = 0 , Trial = data$trialnum , ID = data$id, Blocktype = data$blocktype)
+          
+  for (RepNum in  1:NumReps){ #Loop over all trials
+    
+    if (data$trialnum[RepNum]==1){  #If trial num = 1 reset both Q and Beta, Alpha
+        Q = c(0.4,0.4);
+        this_beta = beta
+        this_alpha = alpha
+    }
+    #Save Q-values
+    Q_data[RepNum,1] <-  Q[1]
+    Q_data[RepNum,2] <-  Q[2]
+
+    
+    #calculate probability of choice based on q levels
+    Pchoice[RepNum] = max(0.001, 1 / (1+ exp(-this_beta* (Q[choice[RepNum]]-Q[3-choice[RepNum]]) ) ) ) #Not quite sure this is correct.
+  
+    
+    #Update With Social Information
+    if (pred==1){
+      print(data$trialnum[RepNum])
+      print(choice[RepNum])
+      print(Q)
+      print(Q[choice[RepNum]]-Q[3-choice[RepNum]])
+      print(Pchoice[RepNum])
+    }
+    #Update the correct Q-value
+    Q[choice[RepNum]] = Q[choice[RepNum]]+this_alpha*(reward[RepNum]-Q[choice[RepNum]])
+  
+    if (data$trialnum[RepNum]==4){ # if trial 4 
+      if (data$blocktype[RepNum]==1){ #If condition = advice
+          this_beta=beta_boost_advice
+          Q[2]= boost_advice
+      }
+      
+      if (data$blocktype[RepNum]==2){ # If condition = observe
+          this_beta = beta_boost_observe
+          Q[2]= boost_observe
+      }
+    }
+
+  }
+  
+  ll = -sum(log(pmax(rep(0.0001,length(Pchoice)),Pchoice)),na.rm = TRUE);
+  #Data frame for output
+  Q_data <<- Q_data
+  
+  if (pred==0){
+    return(ll)
+  }
+  else{
+    return(Pchoice)
+  }
+}
+#Random test
+q_beta_boost__no_co_model(data = filter(data_for_fitting, id == 3323428), par = c(1,2,1,1,1,1,2))
+```
+
+
+```{r model}
+#Run Model
+
+results_df <- data.frame(alpha41 = rep(0, length(unique(data_for_fitting$id))),
+                         beta41 = 0,
+                         boost_advice41=0,
+                         boost_im41=0,
+                         beta_boost_advice41=0,
+                         beta_boost_im41=0,
+                         ll41= 0,
+                         id = 0)
+
+# results_df$alpha41=0
+# results_df$beta41=0
+# results_df$boost_advice41=0
+# results_df$boost_im41=0
+# results_df$beta_boost_advice41=0
+# results_df$beta_boost_im41=0
+# results_df$ll41=0
+Q_list <- c()
+k=1
+for (sub_id in unique(data_for_fitting$id)){
+  print(k)
+  
+  for (block in unique(data_for_fitting$blocktype))
+  this_data = data_for_fitting %>%
+    filter(id ==sub_id) %>%
+    filter(blocktype!=4)
+  
+  this_data= this_data[with(this_data, order(blocknum, trialnum)) , ] #Put data in right order
+  
+  result_1 = optim(par= c(1,0.5,0.9,0.9,1,1),
+        fn = q_beta_boost__no_co_model, data = this_data,
+        lower=c(0.1,0.05,0,0,0.1,0.1), upper=c(50,0.95,1,1,50,50), method="L-BFGS-B")
+ 
+  Q_list[[k]] <- Q_data  
+ # q_beta_boost_model(this_data,result_1$par,1)
+
+  
+  
+  results_df$beta41[k] = result_1$par[1]
+  results_df$alpha41[k] = result_1$par[2]
+  results_df$boost_advice41[k] = result_1$par[3]
+  results_df$boost_im41[k] = result_1$par[4]
+  results_df$beta_boost_advice41[k] = result_1$par[5]
+  results_df$beta_boost_im41[k] = result_1$par[6]
+  results_df$ll41[k] = result_1$value
+  results_df$id[k] = sub_id
+  k=k+1;
+} 
+
+Q_df_final <- do.call("rbind", Q_list)
+write.csv(Q_df_final, "model_fit_opitm_Q.csv")
+
+
+write.csv(results_df,'model_fitting_optim_sigurd.csv')
+
+
+
+```
+
+
+```{r data combine}
+Q_df_final <-  read_csv("model_fit_opitm_Q.csv")
+
+Q_df_final <- Q_df_final %>% 
+  rename(id = ID) %>% 
+  rename(blocktype = Blocktype) %>% 
+  rename(trialnum = Trial)
+
+results_df <- read_csv("model_fitting_optim_sigurd.csv")
+
+#Combine dataset
+df_fit_test <- inner_join(Q_df_final, data_for_fitting, by = c("id", "blocktype","trialnum"))
+
+df_fit_test_final <- merge(df_fit_test, results_df, by = "id")
+write_csv(df_fit_test_final, "All_parameters_experiment.csv")
+```
+
+
+```{r model}
+ggplot(df_fit_test, aes(x = trialnum , y = Q1)) +  stat_summary(fun="mean",position=position_dodge(width=0.1), 
+                 geom="line" ,size=1.5) + stat_summary(fun.data="mean_cl_boot",position=position_dodge(width=.4),  
+                 geom="errorbar",width=0.5 )
+
+```
+
+
+```{r}
+#Plotting
+ggplot(Q_df_final, aes(x= Trial, y = Q2, group = as.factor(Blocktype) , col = as.factor(Blocktype))) +  stat_summary(fun="mean",position=position_dodge(width=0.1), 
+                 geom="line" ,size=1.5) + stat_summary(fun.data="mean_cl_boot",position=position_dodge(width=.4),  
+                 geom="errorbar",width=0.5 )
+
+ggplot(Q_df_final, aes(x= Trial, y = Q2, col = as.factor(Blocktype), group = Blocktype)) + geom_smooth()
+```
+
+# Model 2
+
+
+
+
+
+
+# Random Try
+
+```{r TRY}
+#Run Model
+
+results_df <- data.frame(alpha41 = rep(0, length(unique(data_for_fitting$id))),
+                         beta41 = 0,
+                         boost_advice41=0,
+                         boost_im41=0,
+                         beta_boost_advice41=0,
+                         beta_boost_im41=0,
+                         ll41= 0,
+                         id = 0,
+                         blocktype = 0)
+
+# results_df$alpha41=0
+# results_df$beta41=0
+# results_df$boost_advice41=0
+# results_df$boost_im41=0
+# results_df$beta_boost_advice41=0
+# results_df$beta_boost_im41=0
+# results_df$ll41=0
+
+k=1
+for (sub_id in unique(data_for_fitting$id)){
+  print(k)
+  
+  for (block in unique(data_for_fitting$blocktype)){
+    
+  this_data = data_for_fitting %>%
+    filter(id ==sub_id) %>%
+    filter(blocktype!=4) %>% 
+    filter(blocktype == block)
+  
+  this_data= this_data[with(this_data, order(blocknum, trialnum)) , ] #Put data in right order
+  
+  result_1 = optim(par= c(1,0.5,0.9,0.9,1,1),
+        fn = q_beta_boost__no_co_model, data = this_data,
+        lower=c(0.1,0.05,0,0,0.1,0.1), upper=c(50,0.95,1,1,50,50), method="L-BFGS-B")
+ 
+ # q_beta_boost_model(this_data,result_1$par,1)
+
+  temp <- data.frame(beta41 = result_1$par[1],
+                     alpha41 = result_1$par[2],
+                     boost_advice41 = result_1$par[3],
+                     boost_im41 = result_1$par[4],
+                     beta_boost_advice41 = result_1$par[5],
+                     beta_boost_im41 = result_1$par[6],
+                     ll41 = result_1$value,
+                     id = sub_id,
+                     blocktype = block)
+  
+  results_df <- rbind(results_df, temp)
+  
+  # results_df$beta41 = bind_rows(results_df$beta41 , result_1$par[1])
+  # results_df$alpha41 = bind_rows(results_df$alpha41 , result_1$par[2])
+  # results_df$boost_advice41 = bind_rows(results_df$boost_advice41 , result_1$par[3])
+  # results_df$boost_im41 = bind_rows(results_df$boost_im41,result_1$par[4])
+  # results_df$beta_boost_advice41 = bind_rows(results_df$beta_boost_advice41,result_1$par[5])
+  # results_df$beta_boost_im41 = bind_rows(results_df$beta_boost_im41 ,result_1$par[6])
+  # results_df$ll41 = bind_rows(results_df$ll41,result_1$value)
+  # results_df$id = bind_rows(results_df$id,sub_id)
+  # results_df$blocktype = bind_rows(results_df$blocktype,block)
+
+  }
+  k=k+1;  
+} 
+#write.csv(results_df,'model_fitting_optim.csv')
+
+results_df <- results_df %>% 
+  filter(id != 0)
+
+```
+
+
+```{r}
+ggplot(results_df, aes(x= alpha41)) + geom_histogram() + facet_wrap(~blocktype)
+```
+

@@ -1,0 +1,213 @@
+---
+title: "Simulation"
+author: "Sigurd Fyhn Sørensen"
+date: "5/27/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+rm(list = ls())
+
+library(tidyverse)
+library(lme4)
+library(nlme)
+library(ggpubr)
+library(lmerTest)
+library(wesanderson)
+```
+
+
+```{r}
+sim_fish = function(par) {
+  alpha = par[1]
+  beta = par[2]
+  boost = par[3]
+  beta2 = par[4]
+  Nsub = 1000
+  
+  N = 30
+  result <- data.frame(matrix(ncol = 8, nrow = 0))
+  x <- c("id","trialnum","q1", "q2","q3", "choice","p_choice","reward")
+  colnames(result) <- x
+
+  
+  for(subNum in 1:Nsub){
+    fish1 = pmin(rep(8, N), pmax(rep(2, N), round(rnorm(N, mean = 55, sd = 17) / 10)))
+    fish2 = pmin(rep(8, N), pmax(rep(2, N), round(rnorm(N, mean = 40, sd = 17) / 10)))
+    fish3 = pmin(rep(8, N), pmax(rep(2, N), round(rnorm(N, mean = 65, sd = 17) / 10)))
+    
+    id = rep(subNum,N)
+    q1 = rep(0.33, N)
+    q2 = rep(0.33, N)
+    q3 = rep(0.33, N)
+    
+    trialnum=seq(1,N)
+    choice = rep(1, N)
+    p_choice = rep(0, N)
+    reward = rep(0, N)
+    beta = par[2] # reset beta to normal until social information
+    
+    for (RepNum in 1:N) {
+      tmp_p = exp( beta * c(q1[RepNum], q2[RepNum], q3[RepNum])) / (exp(beta * q1[RepNum]) +
+                                                         exp(beta * q2[RepNum]) + exp(beta * q3[RepNum])) #softmax
+      
+      choice[RepNum] = sample(1:3, 1, prob = tmp_p) # sample options between 1 and 3, with probability of selecting one of a set of options
+      p_choice[RepNum] = tmp_p[choice[RepNum]]
+  
+      if (choice[RepNum] == 1) {
+        reward[RepNum] = fish1[ RepNum]/10
+        #Update
+        PE = reward[RepNum] - q1[RepNum]
+        q1[RepNum + 1] = q1[RepNum] + alpha * PE
+        q2[RepNum + 1] = q2[RepNum]
+        q3[RepNum + 1] = q3[RepNum]
+      } 
+      if (choice[RepNum] == 2){
+        reward[RepNum] = fish2[RepNum]/10
+        PE = reward[RepNum] - q2[RepNum]
+        #Update
+        q1[RepNum + 1] = q1[RepNum] 
+        q2[RepNum + 1] = q2[RepNum] + alpha * PE
+        q3[RepNum + 1] = q3[RepNum]
+      }
+      
+      if (choice[RepNum] == 3){
+        reward[RepNum] = fish3[ RepNum]/10
+        PE = reward[RepNum] - q3[RepNum]
+        #Update
+        q1[RepNum + 1] = q1[RepNum]
+        q2[RepNum + 1] = q2[RepNum] 
+        q3[RepNum + 1] = q3[RepNum] + alpha * PE
+      }
+      
+      if (RepNum == 10){
+        q3[RepNum + 1] =  boost #Change Q value for the comming task 
+        beta=beta2 # Change the beta value (high beta = very greedy)
+      }
+    }
+  #Bind data together
+  result = rbind(result, data.frame(id,trialnum,q1[1:N],q2[1:N],q3[1:N],choice,p_choice,reward) )
+  }
+  return(result)
+}
+
+
+```
+
+```{r}
+# 1) Alpha   2) beta   3) Boost   4) Beta Boost
+A = sim_fish(c(0.6, 6, 1, 6))
+B = sim_fish(c(0.6, 6, 0.9, 6))
+C = sim_fish(c(0.6, 6, 0.8, 6))
+D = sim_fish(c(0.6, 6, 0.7, 6))
+E = sim_fish(c(0.6, 6, 0.6, 6))
+F = sim_fish(c(0.6, 6, 0.5, 6))
+```
+
+
+```{r}
+A$type="1"
+B$type="0.9"
+C$type="0.8"
+D$type="0.7"
+E$type="0.6"
+F$type="0.5"
+
+All_Data = A
+All_Data=rbind(All_Data,B)
+All_Data=rbind(All_Data,C)
+All_Data=rbind(All_Data,D)
+All_Data=rbind(All_Data,E)
+All_Data=rbind(All_Data,F)
+
+df_Q_boost <- All_Data
+
+```
+
+```{r}
+# 1) Alpha   2) beta   3) Boost   4) Beta Boost
+A = sim_fish(c(0.6, 6, 1, 6))
+B = sim_fish(c(0.6, 6, 0.9, 6))
+C = sim_fish(c(0.6, 6, 0.8, 6))
+D = sim_fish(c(0.6, 6, 0.7, 6))
+E = sim_fish(c(0.6, 6, 0.6, 6))
+F = sim_fish(c(0.6, 6, 0.5, 6))
+
+
+```
+
+
+
+```{r}
+Blues = c('#003f5c','#2e5a7b','#50769a','#7393bb','#96b1dd','#bad0ff')
+Greens = c('#136d0b','#438534','#679e58','#8ab77c','#aed0a1','#d1eac7')
+Reds = c('#a30000','#ba4028','#cf684d', '#e28d75', '#f2b29f','#ffd7cb')
+
+custom.col <- c("#FFDB6D", "#C4961A", "#F4EDCA","#D16103", "#C3D7A4", "#52854C", "#4E84C4", "#293352")
+```
+
+
+```{r}
+#Choice 3
+All_Data %>% 
+  group_by(trialnum, type) %>% 
+  summarise(p_choice = mean(choice == 3)) %>% 
+  ggplot(aes(x = trialnum, y = p_choice, col = type , group = type)) + stat_summary(fun="mean",position=position_dodge(width=0.1),geom="line" ,size=1.5) + labs(title = "Probability of choosing the best option") +ylab("p(choose the best option)")
+
+All_Data %>% 
+  group_by(trialnum, type) %>% 
+  summarise(p_choice = mean(choice == 3)) %>% 
+  ggplot(aes(x = trialnum, y = p_choice, col = type , group = type)) + geom_smooth() + labs(title = "Probability of choosing the best option") + ylab("p(choose the best option)")
+```
+
+```{r}
+#Probabilities of choosing the different options with different boost values. 
+All_Data %>% 
+  group_by(trialnum, type) %>% 
+  summarise(p_choice3 = mean(choice == 3), p_choice2 = mean(choice == 2), p_choice1 = mean(choice == 1), sd3 = sd(choice == 3), sd2 = sd(choice ==2), sd1 = sd(choice == 1)) %>% 
+  pivot_longer(cols = starts_with("p_choice"), names_to = "choice", values_to = "probabilities") %>% 
+  ggplot(aes(x = trialnum, y = probabilities, col = choice))+ geom_vline(xintercept = 10,linetype="dashed", color = "grey",size=1) + geom_smooth() + facet_wrap(~type) + labs(title = "Proabilities influenced by varying boost values")
+
+
+All_Data %>% 
+  group_by(trialnum, type) %>% 
+  summarise(p_choice3 = mean(choice == 3), p_choice2 = mean(choice == 2), p_choice1 = mean(choice == 1) ) %>% 
+  pivot_longer(cols = starts_with("p_choice"), names_to = "choice", values_to = "probabilities") %>% 
+  ggplot(aes(x = trialnum, y = probabilities, col = choice)) + geom_vline(xintercept = 10,linetype="dashed", color = "grey",size=1) + stat_summary(fun="mean",position=position_dodge(width=0.1),geom="line" ,size=1.5) + facet_wrap(~type) + labs(title = "Proabilities influenced by varying boost values")
+```
+
+```{r}
+#The choices and their probabilities
+All_Data %>% 
+  ggplot(aes(x = trialnum, y = p_choice, color = choice, group = choice)) + stat_summary(fun="mean",position=position_dodge(width=0.1),geom="line" ,size=1.5) + facet_wrap(~type)
+```
+
+```{r}
+
+```
+
+
+
+```{r}
+ggplot(All_Data, aes(x = trialnum, y = q3.1.N. , color = choice, group = choice)) +  stat_summary(fun="mean",position=position_dodge(width=0.1),geom="line" ,size=1.5) + facet_wrap(~type)
+
+```
+
+
+```{r}
+Afig<-All_Data%>%
+  group_by(type,trialnum)%>%
+  ggplot(aes(x=trialnum , y=choice, colour=type, group= type))+
+  stat_summary(fun="mean",position=position_dodge(width=0.1),geom="line" ,size=1.5) +
+  scale_color_manual(values = Reds) +
+  geom_vline(xintercept = 4.5,linetype="dashed", color = "grey",size=1) +
+  labs(title='Value Boost Effect',x='trial',y='p(choose good lake)') +
+  theme_classic()
+
+Afig
+```
+

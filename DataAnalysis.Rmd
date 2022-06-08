@@ -1,0 +1,846 @@
+---
+title: "DataAnalysisSigurd"
+author: "Sigurd Fyhn Sørensen"
+date: "5/28/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r init}
+library(ggpubr)
+library(lmerTest)
+
+library(tidyverse)
+
+library(rethinking)
+library(cmdstanr)
+library(rstan)
+```
+
+
+```{r init}
+rm(list = ls())
+
+custom.col <- c("#FFDB6D", "#C4961A", "#F4EDCA", 
+                "#D16103", "#C3D7A4", "#52854C", "#4E84C4", "#293352")
+custom2<-c('#2F9599','#F26B38','#F9D423',"#228B22")
+
+all_behave<-read.csv('All_Data_p.csv')
+results_df<-read.csv('model_fitting_optim.csv')
+
+Demog<-all_behave%>%
+  group_by(id)%>%
+  summarise(age=first(age),gender=first(gender),education=first(educatino))
+
+
+Summary <- all_behave%>%
+  filter(blocktype!='4'& rt<20000 )%>%
+  group_by(blocktype)%>%
+  summarise(Reward = mean(reward),RewardSD = sd(reward),RT = mean(rt),RTSD = sd(rt))
+```
+
+
+```{r calculate effects and read data}
+
+clc_order<-function (blocktypenum,blocknum){
+  order=100*blocktypenum[blocknum==0]+10*blocktypenum[blocknum==1]+blocktypenum[blocknum==2]
+  return(order)
+}
+
+all_behave$trialnum2 = all_behave$trialnum+1
+all_behave$blocktypenum[all_behave$blocktype=='advice'] = 1 
+all_behave$blocktypenum[all_behave$blocktype=='eavesdrop'] = 2
+all_behave$blocktypenum[all_behave$blocktype=='self'] = 3
+all_behave$blocktypenum<-as.numeric(all_behave$blocktypenum)
+all_behave$blocknum<-as.numeric(all_behave$blocknum)
+
+temp_order <- all_behave%>%
+  filter(blocktype!='4'& rt<20000 )%>%
+  group_by(id)%>%
+  filter( trialnum==4)%>%
+  summarise(order=clc_order(blocktypenum,blocknum))
+
+#Data frame with parameters for before, during & after social information (trialnum == 4)
+all_behave_short_long <- all_behave%>%
+  filter(blocktype!='4'& rt<20000 )%>%
+  group_by(id,blocktype)%>%
+  summarise(short_reward=first(reward[trialnum==4]),short_choice=first(choice[trialnum==4]),rt_short=first(rt[trialnum==4]),long_reward=mean(reward[trialnum>4]),pre_reward = mean(reward[trialnum<4]),long_choice=mean(choice[trialnum>4]),rt_long=mean(rt[trialnum>4]),RGPTS_persecution=mean(RGPTS_persecution),RGPTS_reference=mean(RGPTS_reference),puzzle_score=mean(puzzle_score),age=mean(age), gender=first(gender),education = first(educatino),blocktypenum=first(blocktypenum),blocknum=first(blocknum))
+
+#Add ID and condition order. 
+all_behave_short_long <- merge(all_behave_short_long,temp_order,by='id')
+
+#Select subset
+all_behave_short_long <- merge(all_behave_short_long,results_df%>%
+                               select(id,beta41,beta_boost_im41,beta_boost_advice41,alpha41,boost_im41,boost_advice41),by='id')
+
+wide_all_behave_short_long<-all_behave%>%filter(blocktype!='4'& rt<20000 )%>%
+  group_by(id,blocktype)%>%summarise(short_reward=first(reward[trialnum==4]),short_choice=first(choice[trialnum==4]),long_reward=mean(reward[trialnum>4]),pre_reward = mean(reward[trialnum<4]),long_choice=mean(choice[trialnum>4]),blocknum=first(blocknum))%>%pivot_wider(names_from = blocktype, values_from = c(short_reward, short_choice,long_reward,long_choice,blocknum)) 
+
+ind_params<-read.csv('ind_params.csv')
+
+wide_all_behave_short_long <- merge(wide_all_behave_short_long,ind_params,by='id')
+wide_all_behave_short_long <- merge(wide_all_behave_short_long,temp_order,by='id')
+wide_all_behave_short_long <- merge(wide_all_behave_short_long,results_df%>%select(id,beta41,beta_boost_im41,beta_boost_advice41,alpha41,boost_im41,boost_advice41),by='id')
+
+all_behave_short_long <- all_behave_short_long%>%
+  mutate(blocktype=factor(blocktype, levels=c('self','eavesdrop','advice')))
+
+
+all_behave <- all_behave %>% 
+  filter(blocknum != 4)
+```
+
+## Explanation load data 
+β, indexes how deterministic decisions are: higher β-values imply more deterministic choice, which can be understood as choosing even marginally better options with higher probability.
+
+The expected value update rate was determined by a learning rate parameter α:
+
+
+blocktype=='advice'] = 1 
+blocktype=='eavesdrop'] = 2
+blocktype=='self'] = 3
+
+
+```{r}
+df_fit_test_final <- read_csv("All_parameters_experiment.csv") 
+
+df_fit_test_final <- df_fit_test_final %>% 
+  mutate(blocktype = as.factor(blocktype)) %>% 
+  mutate(id = as.factor(id)) 
+  
+df_fit_test_final$blocktypeFactor = 0  
+  
+df_fit_test_final$blocktypeFactor[df_fit_test_final$blocktype==1] = "advice"
+df_fit_test_final$blocktypeFactor[df_fit_test_final$blocktype==2] = "eavesdrop"
+df_fit_test_final$blocktypeFactor[df_fit_test_final$blocktype==3] = "self"
+```
+
+
+## Plotting
+```{r}
+df_fit_test_final %>% 
+  #filter(choice == 0) %>% 
+ggplot(aes(x = trialnum , y = Q2, col = blocktypeFactor , group = blocktypeFactor)) +  stat_summary(fun="mean",position=position_dodge(width=0.1), 
+                 geom="line" ,size=1.5) + stat_summary(fun.data="mean_cl_boot",position=position_dodge(width=.4),  
+                 geom="errorbar",width=0.5) 
+
+df_fit_test_final %>% 
+  filter(trialnum == 5) %>% 
+  filter(blocktype == 1) %>% 
+  ggplot(aes(x = boost_advice41, y = Q2, col = blocktype, group = blocktype)) + geom_smooth()
+```
+
+```{r}
+model_test <- lmer(Q2 ~ blocktypeFactor + (1|id), data = filter(df_fit_test_final, trialnum == 5))
+model_test
+
+model_test2 <- glmer(choice ~ blocktypeFactor*puzzle_score + beta41 + alpha41 +(1|id), family = binomial(link = "logit"),data = filter(df_fit_test_final, trialnum == 5))
+
+summary(model_test2)
+```
+
+
+```{r cor-tests}
+library(GGally)
+
+ggpairs(df_fit_test_final, columns = 28:34)
+
+cor.test(df_fit_test_final$beta41, df_fit_test_final$alpha41)
+```
+
+```{r}
+df_fit_test_final %>% 
+  #filter(choice == 0) %>% 
+ggplot(aes(x = as.factor(trialnum) , y = Q2, col = blocktypeFactor)) + geom_boxplot(notch = F, outlier.size = .5) + facet_wrap(~blocktype)
+
+df_fit_test_final %>% 
+  #filter(choice == 0) %>% 
+ggplot(aes(x = as.factor(trialnum) , y = Q1, col = blocktypeFactor)) + geom_boxplot(notch = F, outlier.size = .5) + facet_wrap(~blocktype)
+
+```
+```{r}
+df_fit_test_final %>% 
+  group_by(trialnum, blocktypeFactor) %>% 
+  summarise(mean(choice))
+```
+## Predicting Choice Trial 5
+
+```{r}
+df_fit_test_final %>% 
+  filter(trialnum == 5)
+
+```
+
+
+## MODEL 1
+```{r}
+#Model 1
+data_fit <- list(short_choice = all_behave_short_long$short_choice, RGPTS_persec = all_behave_short_long$RGPTS_persecution , blocktypenum = all_behave_short_long$blocktypenum)
+
+
+model1 <- ulam(alist(
+  short_choice~dbinom(1,p),
+  logit(p) <- a + bPar[blocktypenum] * RGPTS_persec, 
+  #adaptive prior
+  bPar[blocktypenum] ~ normal(barPar,sigmaPar),
+  #Hyperprior
+  barPar ~ normal(0,.25),
+  sigmaPar ~ exponential(1),
+  #Regular prior
+  a ~ normal(0,.5)
+), data = data_fit, chains = 4 , cores = 4)
+
+precis(model1)
+coeftab_plot(coeftab(model1))
+```
+
+
+## MODEL 2  Hypothesis 1
+
+```{r}
+df_trial4 <- df_fit_test_final %>% 
+  filter(trialnum == 5) %>%
+  rename(Q1_trial4 = Q1) %>% 
+  rename(Q2_trial4 = Q2)
+
+df_trial3 <- df_fit_test_final %>% 
+  filter(trialnum == 4) %>% 
+  select(id,blocktypeFactor, Q1, Q2) %>% 
+  rename(Q1_trial3 = Q1) %>% 
+  rename(Q2trial3 = Q2)
+
+df_trial4_3lagg <- merge(df_trial4, df_trial3, by = c("id", "blocktypeFactor"))
+
+df_trial4_3lagg<- df_trial4_3lagg %>% 
+  mutate(Q_trial4_diff = Q2trial3 - Q1_trial3) %>% 
+  mutate(Q_trial5_diff = Q2_trial4 - Q1_trial4)
+
+model2 <- glmer(choice ~ beta41 + blocktypeFactor * RGPTS_persecution + alpha41 + (1|id), family = binomial(link = "logit"), data = df_trial4_3lagg)
+
+summary(model2)
+```
+
+
+\- **Dag Time**
+```{r}
+library(dagitty)
+dag1 <- dagitty("dag{
+  Condition -> Choice_t5
+  Alpha -> Choice_t5 <- BetaBoost
+  Condition -> Diff_Qvalues_t5 -> Choice_t5
+  
+  Beta -> Diff_Qvalues_t4 -> Choice_t5
+  Alpha -> Diff_Qvalues_t4
+  
+  Education -> Alpha 
+  Paranoia_Score -> BetaBoost 
+  Paranoia_Score -> Alpha
+  Alpha -> Diff_Qvalues_t5
+  Condition -> BetaBoost
+}")
+coordinates(dag1) <- list( x = c(Condition = 2, Choice_t5 = 2), y = c(Condition = 0, Choice_t5 = 0) ) 
+plot(dag1)
+```
+
+**Simplified DAG.**
+```{r}
+dag2 <- dagitty("dag{
+  Condition -> Choice_t5
+  Alpha -> Choice_t5 <- BetaBoost
+  Condition -> Diff_Qvalues -> Choice_t5
+  Education -> Alpha 
+  Paranoia_Score -> BetaBoost 
+  Paranoia_Score -> Alpha
+  Alpha -> Diff_Qvalues
+  Condition -> BetaBoost
+}")
+coordinates(dag2) <- list( x = c(Condition = 2, Choice_t5 = 2), y = c(Condition = 0, Choice_t5 = 0) ) 
+plot(dag2)
+```
+```{r}
+impliedConditionalIndependencies(dag2)
+
+adjustmentSets(dag2, exposure= "Condition" , outcome="Choice_t5", type = "all")
+
+adjustmentSets(dag2, exposure=c("Condition", "Diff_Qvalues") , outcome="Choice_t5", type = "all", effect = "total")
+
+adjustmentSets(dag2, exposure=c("Condition", "Diff_Qvalues") , outcome="Choice_t5", type = "minimal", effect = "direct")
+```
+
+
+```{r}
+adjustmentSets(dag2, exposure = c("Condition", "Paranoia_Score"), outcome = "Choice_t5")
+
+adjustmentSets(dag2, exposure = c("Condition", "Paranoia_Score", "Diff_Qvalues"), outcome = "Choice_t5")
+```
+\- **We will try with ulam**
+
+```{r}
+model2_data <- df_trial4_3lagg %>% 
+  select(id, choice, alpha41, beta41, blocktype, RGPTS_persecution, puzzle_score ,educatino, Q_trial5_diff, Q_trial4_diff) %>%
+  mutate(beta41 = scale(beta41), alpha41 = scale(alpha41), RGPTS_persecution = scale(RGPTS_persecution), puzzle_score = scale(puzzle_score), Q_trial4_diff = scale(Q_trial4_diff), Q_trial5_diff = scale(Q_trial5_diff)) %>% 
+  as.list()
+```
+blocktype=='advice'] = 1 
+blocktype=='eavesdrop'] = 2
+blocktype=='self'] = 3
+
+```{r}
+model2 <- ulam(alist(
+  choice ~ dbinom(1,p),
+  logit(p) <- a[blocktype] + bParanoia[blocktype] * RGPTS_persecution + bAlpha * alpha41 + bBeta * beta41, 
+  #adaptive prior
+  a[blocktype] ~ normal(barA, sigmaA),
+  bParanoia[blocktype] ~ normal(barPar,sigmaPar),
+  #Hyperprior
+  barPar ~ normal(0,.25),
+  sigmaPar ~ exponential(1),
+  barA ~ normal(0,.25),
+  sigmaA ~ exponential(1),
+  #Regular prior
+  bAlpha ~ normal(0,.5),
+  bBeta ~ normal(0,.5)
+), data = model2_data, chains = 4 , cores = 4, log_lik = T, refresh = 0)
+```
+
+
+```{r}
+model2.1 <- ulam(alist(
+  choice ~ dbinom(1,p),
+  logit(p) <- a[blocktype] + bParanoia[blocktype] * RGPTS_persecution + bBeta * beta41, 
+  #adaptive prior
+  a[blocktype] ~ normal(barA, sigmaA),
+  bParanoia[blocktype] ~ normal(barPar,sigmaPar),
+  #Hyperprior
+  barPar ~ normal(0,.25),
+  sigmaPar ~ exponential(1),
+  barA ~ normal(0,.25),
+  sigmaA ~ exponential(1),
+  #Regular prior
+  bBeta ~ normal(0,.5)
+), data = model2_data, chains = 4 , cores = 4, log_lik =T, refresh = 0)
+```
+
+
+```{r}
+model2.2 <- ulam(alist(
+  choice ~ dbinom(1,p),
+  logit(p) <- a[id] + bParanoia[blocktype] * RGPTS_persecution, 
+  #adaptive prior
+  a[id] ~ dnorm(barA, sigmaA),
+  bParanoia[blocktype] ~ dnorm(barPar,sigmaPar),
+  #Hyperprior
+  barPar ~ dnorm(0,.5),
+  sigmaPar ~ dexp(1),
+  barA ~ dnorm(0,.5),
+  sigmaA ~ dexp(1)
+), data = model2_data, chains = 4 , cores = 4, log_lik = TRUE, refresh = 0)
+```
+
+
+```{r}
+model2.3 <- ulam(alist(
+  choice ~ dbinom(1,p),
+  logit(p) <- a[id] + bCondition[blocktype] + bParanoia * RGPTS_persecution, 
+  #adaptive prior
+  a[id] ~ dnorm(0, .5),
+  bParanoia ~ dnorm(barPar,sigmaPar),
+  bCondition[blocktype] ~ dnorm(barCon, sigmaCon),
+  #Hyperprior
+  barPar ~ dnorm(0,.5),
+  sigmaPar ~ dexp(1),
+  
+  barCon ~ dnorm(0,.5),
+  sigmaCon ~ dexp(1)
+  ), data = model2_data, chains = 4 , cores = 4, log_lik = TRUE, refresh = 0)
+```
+
+```{r}
+model2.4 <- ulam(alist(
+  choice ~ dbinom(1,p),
+  logit(p) <- a[id] + bCondition[blocktype] + bQdiff * Q_trial4_diff,
+  #adaptive prior
+  a[id] ~ dnorm(0, .25),
+  bCondition[blocktype] ~ dnorm(barCon, sigmaCon),
+  bQdiff ~ dnorm(barQ, sigmaQ),
+  #Hyperprior
+  barCon ~ dnorm(0,.25),
+  sigmaCon ~ dexp(1),
+  barQ ~ dnorm(0, 0.25),
+  sigmaQ ~ dexp(1)  
+  ), data = model2_data, chains = 4 , cores = 4, log_lik = TRUE, refresh = 0)
+```
+```{r}
+model2.5 <- ulam(alist(
+  choice ~ dbinom(1,p),
+  logit(p) <- a[id] + bCondition[blocktype] + bQdiff * Q_trial4_diff + bParanoia * RGPTS_persecution,
+  #adaptive prior
+  a[id] ~ dnorm(0, .25),
+  bParanoia ~ dnorm(barPar,sigmaPar),
+  bCondition[blocktype] ~ dnorm(barCon, sigmaCon),
+  bQdiff ~ dnorm(barQ, sigmaQ),
+  #Hyperprior
+  barPar ~ dnorm(0,.5),
+  sigmaPar ~ dexp(1),
+  
+  barCon ~ dnorm(0,.25),
+  sigmaCon ~ dexp(1),
+  
+  barQ ~ dnorm(0, 0.25),
+  sigmaQ ~ dexp(1)
+  
+  ), data = model2_data, chains = 4 , cores = 4, log_lik = TRUE, refresh = 0)
+```
+
+
+```{r}
+compare(model2,model2.1,model2.2, model2.3,model2.4,model2.5, func = PSIS)
+compare(model2, model2.1,model2.2, model2.3,model2.4,model2.5, func=  WAIC)
+```
+We end up using model2.3 which Choice ~ Condition + Paranoia. Investigating our DAG tells us that the estimates will be a measure for the following: 
+\- Paranoia will be measured as the total causally indirect effect. 
+\- Condition will be the direct causal effect. 
+
+
+**Chain checks** 
+
+```{r}
+trankplot(model2.3, pars = c("bParanoia", "bCondition"), include = F)
+```
+```{r}
+#traceplot(model2.3, pars = c("bParanoia", "bCondition"), include = F)
+```
+
+Our priors seems to be specified alright since our chains looks healthy. 
+
+**Posterior Samples**
+blocktype=='advice'] = 1 
+blocktype=='eavesdrop'] = 2
+blocktype=='self'] = 3
+
+```{r}
+post_2.3 <- extract.samples(model2.3)
+condition_names <- c("Advice", "Eavesdrop", "Self")
+
+par(mfrow = c(2,2))
+for (i in 1:3){
+  dens(inv_logit(post_2.3$bCondition[,i]), main = paste("Absolute effect(%)|Condition:", condition_names[i]))
+}
+dens(exp(post_2.3$bParanoia), main = "Odds - beta Paranoia")
+
+```
+```{r}
+par(mfrow = c(2,2))
+dens(exp(post_2.3$bParanoia), main = "Odds - beta Paranoia")
+for (i in 1:3){
+  dens(exp(post_2.3$bCondition[,i]), main = paste("Relative Effect (Odds)|Condition", condition_names[i]))
+}
+
+```
+**a[id]**
+```{r}
+mean(inv_logit(post_2.3$a))
+sd(inv_logit(post_2.3$a))
+PI(inv_logit(post_2.3$a))
+```
+**bPara**
+```{r}
+mean(exp(post_2.3$bParanoia))
+sd(exp(post_2.3$bParanoia))
+
+
+PI(exp(post_2.3$bParanoia))
+```
+**bCondition[Condition]**
+```{r}
+model2.3_rel_bCon <- apply(post_2.3$bCondition, 2, exp) 
+
+
+model2.3_rel_bCon %>% 
+  apply(2,mean)
+
+model2.3_rel_bCon %>% 
+  apply(2,sd)
+
+model2.3_rel_bCon %>% 
+  apply(2,PI)
+```
+
+
+```{r}
+mean(inv_logit(post_2.3$a))
+sd(inv_logit(post_2.3$a))
+
+dim(post_2.3$a)
+
+a_abs <- apply(post_2.3$a, 2, inv_logit)
+dens(a_abs, )
+apply(a_abs, 2, mean)
+```
+
+**Contrasts**
+```{r}
+contrast_list <- list(Eaves_minus_Self = inv_logit(post_2.3$bCondition[,2]) - inv_logit(post_2.3$bCondition[,3]), 
+                      Advice_minus_Self = inv_logit(post_2.3$bCondition[,1]) - inv_logit(post_2.3$bCondition[,3]), 
+                      Advice_minus_Eaves = inv_logit(post_2.3$bCondition[,1]) - inv_logit(post_2.3$bCondition[,2]))
+
+par(mfrow = c(2,2))
+dens(contrast_list$Eaves_minus_Self, main = "Contrast: Eavesdrop - Self")
+dens(contrast_list$Advice_minus_Self, main = "Contrast: Advice - Self")
+dens(contrast_list$Advice_minus_Eaves, main = "Contrast: Advice - Eavedrop")
+```
+```{r}
+#relative effect in ODDS
+contrast_list_rel <- list(Eaves_minus_Self = exp(post_2.3$bCondition[,2]) - exp(post_2.3$bCondition[,3]), 
+                      Advice_minus_Self = exp(post_2.3$bCondition[,1]) - exp(post_2.3$bCondition[,3]), 
+                      Advice_minus_Eaves = exp(post_2.3$bCondition[,1]) - exp(post_2.3$bCondition[,2]))
+```
+**Contrast Estimates**
+
+
+
+```{r}
+# Eavesdrop - Self
+m1 <- mean(contrast_list_rel$Eaves_minus_Self)
+sd1 <- sd(contrast_list_rel$Eaves_minus_Self)
+PI1 <- PI(contrast_list_rel$Eaves_minus_Self, prob = 0.99)
+
+#Advice - Self
+m2 <- mean(contrast_list_rel$Advice_minus_Self)
+sd2 <- sd(contrast_list_rel$Advice_minus_Self)
+PI2 <- PI(contrast_list_rel$Advice_minus_Self, prob = 0.99)
+
+#Advice - Eavesdrop
+m3 <- mean(contrast_list_rel$Advice_minus_Eaves)
+sd3 <- sd(contrast_list_rel$Advice_minus_Eaves)
+PI3 <- PI(contrast_list_rel$Advice_minus_Eaves, prob = 0.99)
+```
+
+
+```{r}
+print(c(PI1, PI2, PI3))
+```
+
+```{r}
+par(mfrow = c(2,2))
+dens(contrast_list_rel$Eaves_minus_Self, main = "Contrast: Eavesdrop - Self", sub = paste("mean =", round(m1, digits = 4), "sd =", round(sd1, digits = 4)))
+abline(v = m1, col = "red")
+dens(contrast_list_rel$Advice_minus_Self, main = "Contrast: Advice - Self", sub = paste("mean =", round(m2, digits = 4), "sd =", round(sd2, digits = 4)) )
+abline(v = m2, col = "red")
+mtext("All contrasts are measured in (ODDS)",
+      side = , adj = 1, line = -17)
+mtext("Red line indicates the mean",
+      side = , adj = 1, line = -18)
+dens(contrast_list_rel$Advice_minus_Eaves, main = "Contrast: Advice - Eavedrop", sub = paste("mean =", round(m3, digits = 4), "sd =", round(sd3, digits = 4)) )
+abline(v = m3, col = "red")
+
+```
+
+```{r}
+precis(model2.2, depth = 2, pars = "bParanoia")
+```
+
+**Posterior Prediction**
+
+```{r}
+par(mfrow = c(1,3))
+for (sub in 1:10){ #Check for various subject since it is multilevel.
+  ID_sample <- rep(sample(size = 1,  beta_boost_model_data$id, replace = T),10)
+  color_temp = c("Darkgreen", "Blue", "Red")
+  for (i in 1:3){
+  mu <- link(model2.3, post = post_2.3, data = data.frame(RGPTS_persecution = seq(-3,3, length.out = 200), blocktype = i, id = ID_sample))
+  
+  plot(NULL, xlim = c(-3,3), ylim = c(0,1), xlab = "Standardized Paranoia Score", ylab = "% Choose Max Outcome", main = paste("Choose ~ Paranoia|Cond =", ifelse(i == 1, "advice", ifelse(i == 2,"eavesdrop","self"))), sub = paste("Subject =", unique(ID_sample)))
+  for (ii in 1:40) lines(RGPTS_seq, mu[ii,], col = color_temp[i])
+  }
+}
+
+
+```
+
+## Hypothesis 2 model 3
+
+#### Beta_boost model
+```{r}
+beta_boost_model_data <- df_fit_test_final %>% 
+  pivot_longer(cols = starts_with("beta_boost")) %>% 
+  filter(blocktypeFactor != "self") %>% 
+  select(name, value, id, beta41, alpha41, puzzle_score, RGPTS_persecution, educatino) %>% 
+  rename(condition = name, beta_boost = value) %>% 
+  mutate(puzzle_score = scale(puzzle_score), RGPTS_persecution = scale(RGPTS_persecution), beta41 = scale(beta41), alpha41 = scale(alpha41)) %>% 
+  distinct( id, condition , .keep_all = T)
+
+beta_boost_model_data %>% 
+  ggplot(aes(x = log(RGPTS_persecution), y = beta_boost, col = condition)) + geom_point() + facet_wrap(~condition)
+
+
+
+```
+**DAG**
+```{r}
+dag3 <- dagitty("dag{
+  Advice_vs_Eavesdrop -> BetaBoost
+  Paranoia_Score -> BetaBoost
+  Beta -> BetaBoost
+  Education -> PuzzleScore -> BetaBoost
+  Paranoia_Score -> PuzzleScore
+  Paranoia_Score -> Beta 
+}")
+coordinates(dag3) <- list( x = c(BetaBoost = 0, Beta = 1, Paranoia_Score = -.5, Advice_vs_Eavesdrop = -1, PuzzleScore = 0, Education = 1), y = c(BetaBoost = 0, Beta = 0, Paranoia_Score = -1 , Advice_vs_Eavesdrop = 0, PuzzleScore = 1, Education = 1) ) 
+plot(dag3)
+```
+**Test DAG**
+```{r}
+impliedConditionalIndependencies(dag3)
+```
+```{r}
+# Beta _||_ Education | Paranoia, Puzzle
+summary(lm(beta41 ~ educatino + RGPTS_persecution + puzzle_score , data = beta_boost_model_data)) #good
+
+# BetaBoost _||_ Education | Paranoia_score, Puzzle_Score
+summary(lm(beta_boost ~ educatino + RGPTS_persecution + puzzle_score , data = beta_boost_model_data)) #good
+
+#Remove this
+summary(lm(beta41 ~ puzzle_score, data = beta_boost_model_data)) #BAD
+
+
+#puzzle score
+summary(lm(puzzle_score ~ educatino, data = beta_boost_model_data)) #good
+summary(lm(puzzle_score ~ RGPTS_persecution, data = beta_boost_model_data)) #good
+
+
+#Beta
+summary(lm(beta41 ~ RGPTS_persecution, data = beta_boost_model_data)) #good
+summary(lm(beta41 ~ educatino, data = beta_boost_model_data)) #good
+```
+
+**Model Ulam() BetaBoost** 
+```{r}
+adjustmentSets(dag3, exposure = "Paranoia_Score", outcome = "BetaBoost", effect = "direct")
+
+adjustmentSets(dag3, exposure = "Paranoia_Score", outcome = "BetaBoost", effect = "total", type = "all")
+```
+```{r}
+list_beta_data <- beta_boost_model_data %>% 
+  mutate(condition_num = ifelse(condition == "beta_boost_advice41", 1, 0)) %>%
+  select(condition_num, beta_boost, RGPTS_persecution, id) %>% 
+  as.list()
+
+# Aint enough data for hyperpriors.... 
+
+# model3 <- ulam(alist(
+#   beta_boost ~ normal(mu, sigma),
+#   mu <- a[id] + bCon[condition_num] + bPara * RGPTS_persecution,
+#   #Normal Priors
+#   a[id] ~ dnorm(0, .25),
+#   sigma ~ dexp(1),
+#   #Adaptive Priors
+#   bCon[condition_num] ~ dnorm(barCon, sigmaCon),
+#   bPara ~ dnorm(barPara, sigmaPara),
+#   #Hyper-priors
+#   barCon ~ dnorm(0,.25),
+#   barPara ~ dnorm(0,.25),
+#   sigmaCon ~ dexp(1),
+#   sigmaPara ~ dexp(1)
+# ), data = list_beta_data, refresh = 0)
+
+
+#So we go old fashion for prior specification.
+model3 <- ulam(alist(
+  beta_boost ~ normal(mu, sigma),
+  mu <-  a[id] + bCon * condition_num + bPara * RGPTS_persecution,
+  #Normal Priors
+  a[id] ~ normal(mean(beta_boost), 5),
+  bCon ~ normal(0, 5),
+  bPara ~ normal(0, 2.5),
+  sigma ~ exponential(1)
+), data = list_beta_data, chains = 4 , cores = 4, refresh = 0)
+
+```
+```{r}
+#Prior simulation prediction. 
+prior_model3 <- extract.prior(model3, refresh = 0)
+```
+
+```{r}
+par(mfrow = c(2,2))
+for (sub in 1:10){ #Check for various subject since it is multilevel. 
+RGPTS_seq <- seq(-3,3, length.out = 200)
+ID_sample <- rep(sample(size = 1,  beta_boost_model_data$id, replace = T),10)
+
+  for (i in 0:1){
+    mu <- link(model3, post = prior_model3, data = data.frame(RGPTS_persecution = RGPTS_seq, condition_num = i, id = ID_sample))
+    plot(NULL, xlim = c(-3,3), ylim = c(0,50), xlab = "Standardized Paranoia Score", ylab = "BetaBoost", main = paste("BetaBoost ~ Paranoia|Cond =", ifelse(i == 1, "advice", "eavesdrop")), sub = paste("Subject =", unique(ID_sample)))
+    for (ii in 1:100) lines(RGPTS_seq, mu[ii,])
+  }
+}
+
+
+```
+We are satisfied with our prior specification. There are possibilities of Betaboost scores being at both end of the spectrum 0-50 for -3:+3 std. paranoia score. While keeping possible regression lines rather tight and centered at 0 indicating an informative prior. 
+
+**trankplots**
+```{r}
+trankplot(model3, pars = c("bCon", "bPara"))
+traceplot(model3, pars = c("bCon", "bPara"))
+```
+**Posterior**
+```{r}
+precis(model3)
+```
+```{r}
+post_model3 <- extract.samples(model3)
+```
+
+
+```{r}
+par(mfrow = c(2,1),oma = c(0, 0, 2, 0))
+dens(post_model3$bCon, main = "Beta (Advice - Eavesdrop)", xlab = "Beta Value", col = "Green")
+dens(post_model3$bPara, main = "Beta Paranoia", xlab = "Beta Value", col = "Red")
+title(main = "Beta Boost ~ Advice vs Eavesdrop + Paranoia", outer = T)
+```
+```{r}
+mean(post_model3$bCon)
+sd(post_model3$bCon)
+PI(post_model3$bCon, prob = 0.85)
+```
+```{r}
+mean(post_model3$bPara)
+sd(post_model3$bPara)
+PI(post_model3$bPara, prob = 0.85)
+```
+
+
+#### Q_boost model
+
+
+```{r}
+Q_boost_model_data <- df_fit_test_final %>% 
+  pivot_longer(cols = starts_with("boost")) %>% 
+  filter(blocktypeFactor != "self") %>% 
+  select(name, value, id, beta41, alpha41, puzzle_score, RGPTS_persecution, educatino) %>% 
+  rename(condition = name, Qboost = value) %>% 
+  mutate(puzzle_score = scale(puzzle_score), RGPTS_persecution = scale(RGPTS_persecution), beta41 = scale(beta41), alpha41 = scale(alpha41)) %>% 
+  distinct( id, condition , .keep_all = T)
+
+Q_boost_model_data %>% 
+  ggplot(aes(x = RGPTS_persecution, y = Qboost, col = condition)) + geom_point() + facet_wrap(~condition)
+
+
+```
+
+```{r}
+dag4 <- dagitty("dag{
+  Advice_vs_Eavesdrop -> Qboost
+  Paranoia_Score -> Qboost
+  Education -> PuzzleScore -> Qboost
+  Paranoia_Score -> PuzzleScore
+}")
+coordinates(dag4) <- list( x = c(Qboost = 0, Beta = 1, Paranoia_Score = -.5, Advice_vs_Eavesdrop = -1, PuzzleScore = 0, Education = 1), y = c(Qboost = 0, Beta = 0, Paranoia_Score = -1 , Advice_vs_Eavesdrop = 0, PuzzleScore = 1, Education = 1) ) 
+plot(dag4)
+```
+**Check DAG implied conditionak independencices**
+
+```{r}
+impliedConditionalIndependencies(dag4)
+```
+```{r}
+#Already checked most in the DAG for Beta-boost
+
+# Qboost _||_ Education | Paranoia Score & Puzzle Score
+summary(lm(Qboost ~ puzzle_score + RGPTS_persecution + educatino, data = Q_boost_model_data )) #good
+
+#Beta
+summary(lm(Qboost ~ beta41 + RGPTS_persecution, data = Q_boost_model_data )) #bad remove beta from DAG. 
+```
+
+**Model Ulam() Qboost**
+```{r}
+adjustmentSets(dag4, exposure = "Paranoia_Score", outcome = "Qboost", effect = "direct")
+
+adjustmentSets(dag4, exposure = "Paranoia_Score", outcome = "Qboost", effect = "total", type = "all")
+```
+
+```{r}
+list_Qboost_data <- Q_boost_model_data %>% 
+  mutate(condition_num = ifelse(condition == "beta_boost_advice41", 1, 0)) %>%
+  select(condition_num, Qboost, RGPTS_persecution, id) %>% 
+  as.list()
+
+model4 <- ulam(alist(
+  Qboost ~ normal(mu, sigma),
+  mu <- a[id] + bCon * condition_num + bPara * RGPTS_persecution,
+  #Priors
+  a[id] ~ normal(0.5, 0.2),
+  bCon ~ normal(0, 0.125),
+  bPara ~ normal(0, 0.15),
+  
+  sigma ~ exponential(1)
+), data = list_Qboost_data, chain = 4, cores = 4, refresh = 0)
+
+```
+
+**Prior Checks**
+```{r}
+#Prior simulation prediction. 
+prior_model4 <- extract.prior(model4, refresh = 0)
+```
+```{r}
+par(mfrow = c(2,2))
+RGPTS_seq <- seq(-3,3, length.out = 200)
+for (sub in 1:10){ #Check for various subject since it is multilevel. 
+ID_sample <- rep(sample(size = 1,  beta_boost_model_data$id, replace = T),10)
+  
+  for (i in 0:1){
+    mu <- link(model4, post = prior_model4, data = data.frame(RGPTS_persecution = RGPTS_seq, condition_num = i, id = ID_sample))
+    plot(NULL, xlim = c(-3,3), ylim = c(-1,1), xlab = "Standardized Paranoia Score", ylab = "Qboost", main = paste("Qboost ~ Paranoia|Cond =", ifelse(i == 1, "advice", "eavesdrop")), sub = paste("Subject =", unique(ID_sample)))
+    for (ii in 1:50) lines(RGPTS_seq, mu[ii,])
+  }
+}
+```
+**Chain Investigation**
+```{r}
+traceplot(model4, pars = c("bCon", "bPara"))
+trankplot(model4, pars = c("bCon", "bPara"))
+```
+
+**Posterior**
+```{r}
+post_model4 <- extract.samples(model4)
+```
+
+```{r}
+par(mfrow= c(2,1), oma = c(0, 0, 2, 0))
+dens(post_model4$bCon, xlab = "Beta Value", main = "Beta Condition", col = "green")
+dens(post_model4$bPara, xlab = "Beta Value", main = "Beta Paranoia", col = "red")
+title("Qboost ~ Advice vs Eavesdrop + Paranoia", outer = TRUE, cex = 1.5)
+```
+```{r}
+mean(post_model4$bCon)
+sd(post_model4$bCon)
+PI(post_model4$bCon, prob = 0.85)
+```
+```{r}
+mean(post_model4$bPara)
+sd(post_model4$bPara)
+PI(post_model4$bPara, prob = 0.85)
+```
+```{r}
+par(mfrow = c(2,1),oma = c(0, 0, 1, 0))
+plot(dag3)
+mtext("Model 2", side = 3,line = 1,adj = 0, col = "red", font = 2)
+plot(dag4)
+mtext("Model 3", side = 3,line = 1,adj = 0, col = "red", font = 2)
+```
+
+
+```{r}
+plot(dag2)
+mtext("Model 1", side = 3,line = 1,adj = 0, col = "red", font = 2)
+```
+
+
+
